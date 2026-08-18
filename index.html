@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>日中時刻</title>
+
+    <link rel="icon" href="icons/noon48.png" />
+    <link rel="canonical" href="https://adbdao.github.io/pwa_noon/" />
+    <link rel="manifest" href="/pwa_noon/blog.webmanifest">
+    <base target="_blank">
+
+    <style>
+        ::selection {
+            background: olive;
+            color: yellow;
+        }
+
+        ::-moz-selection {
+            background: olive;
+            color: yellow;
+        }
+
+        #reload {
+            height: 40px;
+            background: yellowgreen;
+        }
+
+        button {
+            border-radius: 15px;
+        }
+
+        input {
+            border-radius: 15px;
+            margin: 0 6vw;
+        }
+
+        #mytime {
+            width: 80vw;
+            color: green;
+            padding: 10px 10px 10px 10px;
+            font-size: 2em;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body ontouchstart>
+    <input id="reload" type="button" value="重整頁面" onclick="javascript:window.location.reload()" />
+    <button id="addPWA" disabled>點此安裝APP</button>
+    <a href="https://github.com/adbdao/pwa_noon" target="_blank"><input type="button" value="安裝說明" /></a>
+    <div id="mytime"></div>
+    <p>
+        若出現瀏覽器請求位置資訊，請按〔允許〕。<br>
+        若連線慢，請等幾秒鐘！<br>
+        若出現〔失敗…無法取得〕，請重整頁面即可……也許要重整數次
+    </p>
+    <script>
+        window.addEventListener('load', function () {
+            var btnSave = document.getElementById('addPWA')
+            var savedPrompt
+            // 註冊serviceWorker
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register(
+                    // Github路徑
+                    '/pwa_by/pwabuilder-sw.js',
+                    { scope: '/pwa_by/' }
+                )
+                    .then(function (registration) {
+                        console.log('ServiceWorker registration successful with scope:', registration.scope)
+                        // alert('安裝成功')
+                    }).catch(function (err) {
+                        console.log('ServiceWorker registration failed:', err)
+                        // alert('安裝失敗，請重新安裝')
+                    })
+            }
+            // 安裝按鈕
+            window.addEventListener('beforeinstallprompt', function (e) {
+                e.preventDefault()
+                btnSave.removeAttribute('disabled')
+                savedPrompt = e
+                // 我設定true
+                return true
+                // return false
+            })
+            // 安裝按鈕
+            btnSave.addEventListener('click', function () {
+                if (savedPrompt !== undefined) {
+                    savedPrompt.prompt()
+
+                    savedPrompt.userChoice.then(function (result) {
+
+                        if (result.outcome == 'dismissed') {
+                            // alert('使用者關閉主營幕')
+                            console.log('User dismissed homescreen install')
+                        } else {
+                            // alert('使用者加入主營幕')
+                            console.log('User added to homescreen')
+                        }
+                        savedPrompt = null
+                    })
+                }
+            })
+        })
+    </script>
+    <script>
+        // 用Google的AI寫的函數，算出我所在的本地定位+城市名+日出日中時間
+
+        /**
+        * 取得當前定位與地名，並將日出日中資訊寫入 <div id="mytime"></div>
+        */
+        async function updateSunTimesToDiv() {
+            const targetDiv = document.getElementById("mytime");
+            if (!targetDiv) {
+                console.error("找不到 id 為 mytime 的 div 元素");
+                return;
+            }
+
+            try {
+                // 1. 使用 HTML5 地理定位 API 獲取使用者座標
+                const position = await new Promise((resolve, reject) => {
+                    if (!navigator.geolocation) {
+                        reject(new Error("您的瀏覽器不支援地理定位 API 功能"));
+                    }
+                    navigator.geolocation.getCurrentPosition(resolve, reject, {
+                        enableHighAccuracy: true,
+                        timeout: 10000,
+                        maximumAge: 0
+                    });
+                });
+
+                const lat = position.coords.latitude;
+                const lng = position.coords.longitude;
+                const now = new Date();
+
+                // 2. 調用 Reverse Geocoding API 取得城市/地區名稱
+                let cityName = "未知地區";
+                try {
+                    const response = await fetch(
+                        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=zh-TW`
+                    );
+                    if (response.ok) {
+                        const geoData = await response.json();
+                        const addr = geoData.address || {};
+                        cityName = addr.city || addr.town || addr.county || addr.village || addr.state || "未知地區";
+                    }
+                } catch (e) {
+                    console.warn("無法取得城市名稱:", e);
+                }
+
+                // 3. 日期天文計算
+                const startOfYear = new Date(now.getFullYear(), 0, 0);
+                const diff = now - startOfYear;
+                const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
+
+                // 均時差 Equation of Time (分鐘)
+                const B = (2 * Math.PI * (dayOfYear - 81)) / 364;
+                const eqTime = 9.87 * Math.sin(2 * B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B);
+
+                // 太陽赤緯 Solar Declination (弧度)
+                const declination = 23.45 * Math.sin((2 * Math.PI * (284 + dayOfYear)) / 365) * (Math.PI / 180);
+
+                // 當地時區偏移 (小時)
+                const timeZoneOffsetHours = -now.getTimezoneOffset() / 60;
+
+                // 4. 計算「日中」時間 (Solar Noon)
+                const solarNoonMinutes = 720 - 4 * lng - eqTime + timeZoneOffsetHours * 60;
+
+                // 5. 計算「日出」時間 (Sunrise)
+                const latRad = lat * (Math.PI / 180);
+                const cosHourAngle = -Math.tan(latRad) * Math.tan(declination);
+
+                if (cosHourAngle > 1) throw new Error("該地區今日為極夜（無日出）");
+                if (cosHourAngle < -1) throw new Error("該地區今日為極晝（無日落）");
+
+                const hourAngle = Math.acos(cosHourAngle) * (180 / Math.PI);
+                const sunriseMinutes = solarNoonMinutes - hourAngle * 4;
+
+                // 格式化時間為 HH:mm:ss
+                const formatTime = (totalMinutes) => {
+                    const hrs = String(Math.floor(totalMinutes / 60) % 24).padStart(2, '0');
+                    const mins = String(Math.floor(totalMinutes % 60)).padStart(2, '0');
+                    const secs = String(Math.floor((totalMinutes % 1) * 60)).padStart(2, '0');
+                    return `${hrs}:${mins}:${secs}`;
+                };
+
+                // 轉換經緯度標示
+                const latStr = lat >= 0 ? `北緯${lat.toFixed(2)}` : `南緯${Math.abs(lat).toFixed(2)}`;
+                const lngStr = lng >= 0 ? `東經${lng.toFixed(2)}` : `西經${Math.abs(lng).toFixed(2)}`;
+
+                // 6. 將結果寫入 DOM 的 innerHTML（使用 <br> 進行換行）
+                targetDiv.innerHTML =
+                    `當前位置：${lngStr} ${latStr}<br>` +
+                    `城市：${cityName}<br>` +
+                    `今日日出時間：${formatTime(sunriseMinutes)}<br>` +
+                    `今日日中時間：${formatTime(solarNoonMinutes)}`;
+
+            } catch (err) {
+                targetDiv.innerHTML = `計算失敗：${err.message}`;
+            }
+        }
+
+        // === 執行函數 ===
+        updateSunTimesToDiv();
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/darkmode-js@1.5.7/lib/darkmode-js.min.js"></script>
+    <script>
+        // 亮色暗色模式切換的套件
+        function addDarkmodeWidget() {
+            new Darkmode().showWidget();
+        }
+        window.addEventListener('load', addDarkmodeWidget);
+    </script>
+</body>
+
+</html>
