@@ -126,8 +126,8 @@
                     }
                     navigator.geolocation.getCurrentPosition(resolve, reject, {
                         enableHighAccuracy: true,
-                        timeout: 10000,
-                        maximumAge: 0
+                        timeout: 10000,          // 將超時時間延長至 10 秒（給純 GPS 搜尋的時間）
+                        maximumAge: 3600000       // 允許使用 1 小時內的快取位置（離線時極為實用）
                     });
                 });
 
@@ -135,54 +135,95 @@
                 const lng = position.coords.longitude;
                 const now = new Date();
 
-                // 2. 調用 Reverse Geocoding API 取得城市/地區名稱
+                // 2. 調用 Reverse Geocoding API 取得城市/地區名稱 查詢與容錯處理
                 let cityName = "未知地區";
                 try {
                     const response = await fetch(
-                        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=zh-TW`
+                        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=zh-TW`,
+                        {
+                            headers: {
+                                // Nominatim 要求必須提供 User-Agent，否則可能回傳 403 錯誤
+                                'User-Agent': 'SunTimesApp/1.0'
+                            }
+                        }
                     );
+
                     if (response.ok) {
                         const geoData = await response.json();
                         const addr = geoData.address || {};
-                        cityName = addr.city || addr.town || addr.county || addr.village || addr.state || "未知地區";
+                        // 優先抓取精確市鎮，若無則抓取較大的行政區，最後以 display_name 的第一段做底
+                        // 動態降級（Fallback）機制：涵蓋各國行政區劃，若無特定欄位則抓 display_name 第一段
+                        cityName = addr.city || addr.town || addr.municipality || addr.county ||
+                            addr.district || addr.suburb || addr.village || addr.state || addr.country ||
+                            (geoData.display_name ? geoData.display_name.split(',')[0] : "未知地區");
+                    } else if (response.status === 429) {
+                        console.warn("地理定位 API 請求過於頻繁 (429)");
+                        cityName = "查詢過頻";
+                    } else {
+                        console.warn(`地理定位伺服器錯誤，狀態碼：${response.status}`);
+                        cityName = "定位服務暫時無法使用";
                     }
                 } catch (e) {
-                    console.warn("無法取得城市名稱:", e);
+                    console.warn("網路連線失敗或無法取得城市名稱:", e);
+                    cityName = "網路連線異常";
                 }
 
-                // 3. 日期天文計算
-                const startOfYear = new Date(now.getFullYear(), 0, 0);
-                const diff = now - startOfYear;
-                const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
+                // 3. 高精度天文計算 (NOAA 簡化近似演算法)
+                const year = now.getFullYear();
+                const startOfYear = new Date(Date.UTC(year, 0, 1));
+                const todayUTC = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+                const dayOfYear = Math.floor((todayUTC - startOfYear) / (1000 * 60 * 60 * 24)) + 1;
+
+                const degToRad = Math.PI / 180;
+                const radToDeg = 180 / Math.PI;
+
+                // 太陽平黃經 (Mean Longitude) 與 平近點角 (Mean Anomaly)
+                const L0 = 280.466 + 0.9856474 * dayOfYear;
+                const M = (357.529 + 0.9856003 * dayOfYear) * degToRad;
+
+                // 黃道經度 (Ecliptic Longitude)
+                const C = (1.9148 * Math.sin(M) + 0.02 * Math.sin(2 * M)) * degToRad;
+                const sunTrueLong = (L0 + C * radToDeg) * degToRad;
+
+                // 太陽赤緯 (Solar Declination)
+                const declination = Math.asin(Math.sin(23.44 * degToRad) * Math.sin(sunTrueLong));
 
                 // 均時差 Equation of Time (分鐘)
-                const B = (2 * Math.PI * (dayOfYear - 81)) / 364;
-                const eqTime = 9.87 * Math.sin(2 * B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B);
+                const y = Math.tan((23.44 / 2) * degToRad) ** 2;
+                const L0Rad = L0 * degToRad;
+                const eqTimeRad = y * Math.sin(2 * L0Rad) - 2 * 0.0167 * Math.sin(M) +
+                    4 * 0.0167 * y * Math.sin(M) * Math.cos(2 * L0Rad) -
+                    0.5 * (y ** 2) * Math.sin(4 * L0Rad);
+                const eqTime = eqTimeRad * radToDeg * 4; // 弧度轉為分鐘
 
-                // 太陽赤緯 Solar Declination (弧度)
-                const declination = 23.45 * Math.sin((2 * Math.PI * (284 + dayOfYear)) / 365) * (Math.PI / 180);
+                // 4. 時區與經度修正
+                const timeZoneOffsetHours = -now.getTimezoneOffset() / 60; // 例如台灣為 +8
+                const standardMeridian = timeZoneOffsetHours * 15;        // UTC+8 中央經線為 120°
+                const longitudeCorrection = (lng - standardMeridian) * 4;   // 偏東為正 (提早過中天)
 
-                // 當地時區偏移 (小時)
-                const timeZoneOffsetHours = -now.getTimezoneOffset() / 60;
-
-                // 4. 計算「日中」時間 (Solar Noon)
-                const solarNoonMinutes = 720 - 4 * lng - eqTime + timeZoneOffsetHours * 60;
+                // 計算「日中」時間 (Solar Noon，標準時的分鐘數)
+                const solarNoonMinutes = 720 - longitudeCorrection - eqTime;
 
                 // 5. 計算「日出」時間 (Sunrise)
-                const latRad = lat * (Math.PI / 180);
-                const cosHourAngle = -Math.tan(latRad) * Math.tan(declination);
+                // 考慮大氣折射 (-0.533°) 與太陽上緣邊界 (-0.3°)，標準天頂角為 90.833°
+                const zenith = 90.833 * degToRad;
+                const latRad = lat * degToRad;
+
+                const cosHourAngle = (Math.cos(zenith) - Math.sin(latRad) * Math.sin(declination)) /
+                    (Math.cos(latRad) * Math.cos(declination));
 
                 if (cosHourAngle > 1) throw new Error("該地區今日為極夜（無日出）");
                 if (cosHourAngle < -1) throw new Error("該地區今日為極晝（無日落）");
 
-                const hourAngle = Math.acos(cosHourAngle) * (180 / Math.PI);
+                const hourAngle = Math.acos(cosHourAngle) * radToDeg;
                 const sunriseMinutes = solarNoonMinutes - hourAngle * 4;
 
-                // 格式化時間為 HH:mm:ss
+                // 6. 時間格式化 (HH:mm:ss)
                 const formatTime = (totalMinutes) => {
-                    const hrs = String(Math.floor(totalMinutes / 60) % 24).padStart(2, '0');
-                    const mins = String(Math.floor(totalMinutes % 60)).padStart(2, '0');
-                    const secs = String(Math.floor((totalMinutes % 1) * 60)).padStart(2, '0');
+                    const normalizedMinutes = (totalMinutes + 1440) % 1440; // 確保數值維持在 0~1440 之內
+                    const hrs = String(Math.floor(normalizedMinutes / 60)).padStart(2, '0');
+                    const mins = String(Math.floor(normalizedMinutes % 60)).padStart(2, '0');
+                    const secs = String(Math.floor((normalizedMinutes % 1) * 60)).padStart(2, '0');
                     return `${hrs}:${mins}:${secs}`;
                 };
 
@@ -202,7 +243,7 @@
             }
         }
 
-        // === 執行函數 ===
+        // 執行函數
         updateSunTimesToDiv();
     </script>
     <script src="https://cdn.jsdelivr.net/npm/darkmode-js@1.5.7/lib/darkmode-js.min.js"></script>
