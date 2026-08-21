@@ -53,9 +53,10 @@
     <a href="https://github.com/adbdao/pwa_noon" target="_blank"><input type="button" value="安裝說明" /></a>
     <div id="mytime"></div>
     <p>
+        手機請開啟 GPS 定位功能<br>
         若出現瀏覽器請求位置資訊，請按〔允許〕。<br>
         若連線慢，請等幾秒鐘！<br>
-        若出現〔失敗…無法取得〕，請重整頁面即可……也許要重整數次
+        若出現〔失敗…無法取得〕，請重整頁面即可……也許要重整數次！
     </p>
     <script>
         window.addEventListener('load', function () {
@@ -126,7 +127,7 @@
                     }
                     navigator.geolocation.getCurrentPosition(resolve, reject, {
                         enableHighAccuracy: true,
-                        timeout: 10000,          // 將超時時間延長至 10 秒（給純 GPS 搜尋的時間）
+                        timeout: 30000,          // 將超時時間延長至 30 秒（給純 GPS 搜尋的時間）
                         maximumAge: 3600000       // 允許使用 1 小時內的快取位置（離線時極為實用）
                     });
                 });
